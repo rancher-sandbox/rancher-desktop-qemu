@@ -1,0 +1,149 @@
+# Copyright 2024 SUSE LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: build
+on: [ push ]
+permissions:
+  contents: read
+jobs:
+  macos:
+    strategy:
+      matrix:
+        include:
+        - { arch: aarch64, runs-on: macos-14 }
+        - { arch: x86_64, runs-on: macos-13 }
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 40
+    steps:
+    - run: mkdir -p build
+    - run: brew install filemonitor ninja
+    - run: brew install --ignore-dependencies lima # Don't pull in qemu
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - run: brew install --build-from-source ./qemu.rb
+      env:
+        HOMEBREW_DEBUG: 1
+        HOMEBREW_VERBOSE: 1
+      timeout-minutes: 20
+    - run: cpan -Ti JSON
+    - run: echo "$PWD/install/bin" >> "$GITHUB_PATH"
+    - run: perl lima-and-qemu.pl alpine
+      timeout-minutes: 10
+    - uses: actions/upload-artifact@v4
+      with:
+        name: qemu-darwin-${{ matrix.arch }}
+        path: qemu-darwin-${{ matrix.arch }}.tar.gz
+        if-no-files-found: error
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - uses: actions/checkout@v4
+      with:
+        repository: qemu/qemu
+        ref: v9.1.0
+        path: qemu
+    - name: Install dependencies
+      run: >-
+        sudo apt-get update &&
+        sudo apt-get install -y
+        ninja-build
+        libattr1
+        libattr1-dev
+    - run: mkdir build
+    - run: >-
+        ../qemu/configure
+        --prefix=/usr
+        --target-list=x86_64-softmmu
+        --disable-alsa
+        --disable-bochs
+        --disable-cloop
+        --disable-curses
+        --disable-dbus-display
+        --disable-dmg
+        --disable-gcrypt
+        --disable-guest-agent
+        --disable-iconv
+        --disable-jack
+        --disable-keyring
+        --disable-l2tpv3
+        --disable-oss
+        --disable-pa
+        --disable-parallels
+        --disable-pipewire
+        --disable-pixman
+        --disable-plugins
+        --disable-png
+        --disable-qcow1
+        --disable-qed
+        --disable-replication
+        --disable-selinux
+        --disable-sndio
+        --disable-user
+        --disable-vdi
+        --disable-vduse-blk-export
+        --disable-vhdx
+        --disable-vmdk
+        --disable-vnc
+        --disable-vpc
+        --disable-vvfat
+        --disable-xen
+        --disable-zstd
+        --enable-slirp
+        --enable-virtfs
+      working-directory: build
+    - run: cat meson-logs/meson-log.txt
+      working-directory: build
+      if: failure()
+    - run: ninja
+      working-directory: build
+      timeout-minutes: 60
+    - run: make install DESTDIR=${{ github.workspace }}/install
+      working-directory: build
+    - run: ./appdir-qemu.sh "${{ github.workspace }}/install/usr"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: qemu-linux-x86_64
+        path: qemu-linux-x86_64.tar.gz
+        if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        merge-multiple: true
+    - name: Generate checksums
+      run: |
+        for i in qemu-*.tar.gz; do
+          sha512sum -b "$i" > "$i.sha512sum"
+        done
+    - name: Create release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: >-
+        gh release create
+        "${{ github.ref_name }}"
+        qemu-*.tar.gz
+        qemu-*.tar.gz.sha512sum
+        --draft
+        --title "${{ github.ref_name }}"
+        --repo "${{ github.repository }}"
