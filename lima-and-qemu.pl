@@ -1,4 +1,23 @@
 #!/usr/bin/env perl
+
+# Copyright 2024 SUSE LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Adapted from https://github.com/runfinch/finch-core/blob/95fce20b69f0/bin/lima-and-qemu.pl
+# Itself adapted from https://github.com/rancher-sandbox/lima-and-qemu/blob/c4e3bb286c7/bin/lima-and-qemu.pl
+
+#!/usr/bin/env perl
 use strict;
 use warnings;
 
@@ -11,7 +30,7 @@ my $arch = $proc =~ /86/ ? "x86_64" : "aarch64";
 # By default capture both legacy firmware (alpine) and UFI (default) usage
 @ARGV = qw(alpine default) unless @ARGV;
 
-# This script creates a tarball containing lima and qemu, plus all their
+# This script creates a tarball containing qemu as launched by lima, plus all its
 # dependencies from /usr/local/** or /opt/homebrew/.
 # Files opened by limactl and qemu are captured using https://github.com/objective-see/FileMonitor
 # `limactl start examples/alpine.yaml; limactl stop alpine; limactrl delete alpine`.
@@ -27,8 +46,7 @@ my $arch = $proc =~ /86/ ? "x86_64" : "aarch64";
 # It shows the following binaries from /usr/local are called:
 
 my %deps;
-my $install_dir = $arch eq "x86_64" ? "/usr/local" : "/opt/homebrew";
-record("$install_dir/bin/limactl");
+chomp(my $install_dir = qx(brew --prefix));
 record("$install_dir/bin/qemu-img");
 record("$install_dir/bin/qemu-system-$arch");
 
@@ -46,15 +64,15 @@ END { system("sudo pkill FileMonitor") }
 print "sudo may prompt for password to run FileMonitor\n";
 
 #Change this FileMonitor path for local build to installed path
-system("sudo -b /Applications/FileMonitor.app/Contents/MacOS/FileMonitor >$filemonitor 2>/dev/null");
+system("sudo -b filemonitor -skipApple >$filemonitor 2>/dev/null");
 sleep(1) until -s $filemonitor;
 
-my $repo_root = join('/', dirname($FindBin::Bin), 'src', 'lima');
+chomp(my $lima_dir = qx(brew --prefix lima));
 for my $example (@ARGV) {
-    my $config = "$repo_root/examples/$example.yaml", ;
+    my $config = "$lima_dir/share/lima/templates/$example.yaml";
     die "Config $config not found" unless -f $config;
     system("limactl delete -f $example") if -d "$ENV{HOME}/.lima/$example";
-    system("limactl start --tty=false $config");
+    system("limactl start --tty=false --cpus 2 --log-level debug $config");
     system("limactl shell $example uname");
     system("limactl stop $example");
     system("limactl delete $example");
@@ -62,21 +80,19 @@ for my $example (@ARGV) {
 system("sudo pkill FileMonitor");
 
 sleep 10;
-# truncate last line to remove offending json string
-my $addr;
-open (FH, "+< $filemonitor") or die "can't update $filemonitor: $!";
-while ( <FH> ) {
-    $addr = tell(FH) unless eof(FH);
-}
-truncate(FH, $addr) or die "can't truncate $filemonitor: $!";
 
 open(my $fh, "<", $filemonitor) or die "Can't read $filemonitor: $!";
 while (my $line = <$fh>) {
-    # Only record files opened by limactl or qemu-*
-    my $decoded_json = decode_json($line);
+    # Only record files opened by qemu-*
+    my $decoded_json;
+    {
+        local $@;
+        eval { $decoded_json = decode_json($line) };
+        next if $@;
+    }
     my $processName = $decoded_json->{'file'}{'process'}{'name'};
     my $fileName = $decoded_json->{'file'}{'destination'};
-    next unless $processName =~ /^\s*(limactl|qemu-)/;
+    next unless $processName =~ /^\s*qemu-/;
 
     # Skip /opt/homebrew/bin and /usr/local/bin
     next if $fileName eq "$install_dir/bin";
@@ -100,10 +116,18 @@ while (my $line = <$fh>) {
     }
 }
 
+# Temporary hack because we can't run qemu aarch64 in CI
+if ($arch eq "aarch64") {
+    chomp(my $qemu_dir = qx(brew --prefix qemu));
+    record("$qemu_dir/share/qemu/kvmvapic.bin");
+    record("$qemu_dir/share/qemu/efi-virtio.rom");
+    record("$qemu_dir/share/qemu/vgabios-virtio.bin");
+}
+
 print "$_ $deps{$_}\n" for sort keys %deps;
 print "\n";
 
-my $dist = "lima-and-qemu";
+my $dist = "qemu-darwin-$arch";
 system("rm -rf /tmp/$dist");
 
 # Copy all files to /tmp tree and make all dylib references relative to the
@@ -158,6 +182,14 @@ if (-f "/opt/socket_vmnet/bin/socket_vmnet") {
 # to remove the quarantine xattr when applying updates.
 system("chmod -R u+w /tmp/$dist");
 
+# Remove Finder-related xattrs from files; having them causes code signing to
+# fail, with the message:
+# > resource fork, Finder information, or similar detritus not allowed
+for my $attr (("com.apple.FinderInfo", "com.apple.ResourceFork")) {
+    system("xattr -drs $attr /tmp/$dist");
+}
+
+my $repo_root = $FindBin::Bin;
 unlink("$repo_root/$dist.tar.gz");
 system("tar cvfz $repo_root/$dist.tar.gz -C /tmp/$dist $files");
 
