@@ -3,6 +3,7 @@ use strict;
 use warnings;
 
 use FindBin qw();
+use JSON qw( decode_json );
 
 my $proc = qx(uname -p);
 my $arch = $proc =~ /86/ ? "x86_64" : "aarch64";
@@ -11,24 +12,17 @@ my $arch = $proc =~ /86/ ? "x86_64" : "aarch64";
 @ARGV = qw(alpine default) unless @ARGV;
 
 # This script creates a tarball containing lima and qemu, plus all their
-# dependencies from /usr/local/**.
-#
-# New processes (with their command line arguments) have been captured by
-# `sudo dtrace -s /usr/bin/newproc.d` (on a system with SIP disabled, using lima 0.3.0):
+# dependencies from /usr/local/** or /opt/homebrew/.
+# Files opened by limactl and qemu are captured using https://github.com/objective-see/FileMonitor
 # `limactl start examples/alpine.yaml; limactl stop alpine; limactrl delete alpine`.
-#
-# 5680 <777>  limactl start --tty=false examples/alpine.yaml
-# 5681 <5680> curl -fSL -o /Users/jan/Library/Caches/lima/download/by-url-sha256/21753<...>
-# 5683 <5680> qemu-img create -f qcow2 /Users/jan/.lima/alpine/diffdisk 107374182400
-# 5684 <5680> /usr/local/bin/limactl hostagent --pidfile /Users/jan/.lima/alpine/ha.pid alpine
-# 5686 <5684> ssh-keygen -R [127.0.0.1]:60020 -R [localhost]:60020
-# 5687 <5684> ssh -o ControlMaster=auto -o ControlPath=/Users/jan/.lima/alpine/ssh.sock -o <...>
-# 5685 <5684> /usr/local/bin/qemu-system-x86_64 -cpu Haswell-v4 -machine q35,accel=hvf -smp <...>
-# 5689 <5684> ssh -o ControlMaster=auto -o ControlPath=/Users/jan/.lima/alpine/ssh.sock -o <...>
-# ... many more ssh sub-processes like the one above ...
-# 5800 <777>  limactl stop alpine
-# 5801 <5684> ssh -o ControlMaster=auto -o ControlPath=/Users/jan/.lima/alpine/ssh.sock -o <...>
-# 5896 <777>  limactl delete alpine
+
+# {"event":"ES_EVENT_TYPE_NOTIFY_WRITE","timestamp":"2022-11-02 02:19:42 +0000","file":
+# {"destination":"/Users/siravara/.lima/default/cidata.iso","
+# process":{"pid":35515,"name":"limactl","path":"/opt/homebrew/bin/limactl",
+# "uid":504,"architecture":"Apple Silicon","arguments":[],"ppid":35512,"rpid":812,"ancestors"
+# :[812,1],"signing info (reported)":{"csFlags":570556419,"platformBinary":0,"signingID":"a.out","teamID":"",
+# "cdHash":"37B6887F5188C68A1A072989289EAFDB8B68C75A"},"signing info (computed)":{"signatureStatus":0,"signatureSigner":
+# "AdHoc","signatureID":"a.out"}}}}
 #
 # It shows the following binaries from /usr/local are called:
 
@@ -46,16 +40,18 @@ my $name = "$install_dir/share/qemu";
 # Don't call record($name) because we only want the link, not the whole target directory
 $deps{$name} = "→ " . readlink($name);
 
-# Capture any library and datafiles access with opensnoop
-my $opensnoop = "/tmp/opensnoop.log";
-END { system("sudo pkill dtrace") }
-print "sudo may prompt for password to run opensnoop\n";
-system("sudo -b opensnoop >$opensnoop 2>/dev/null");
-sleep(1) until -s $opensnoop;
+# Capture any library and datafiles access with FileMonitor
+my $filemonitor = "/tmp/filemonitor.log";
+END { system("sudo pkill FileMonitor") }
+print "sudo may prompt for password to run FileMonitor\n";
 
-my $repo_root = dirname($FindBin::Bin);
+#Change this FileMonitor path for local build to installed path
+system("sudo -b /Applications/FileMonitor.app/Contents/MacOS/FileMonitor >$filemonitor 2>/dev/null");
+sleep(1) until -s $filemonitor;
+
+my $repo_root = join('/', dirname($FindBin::Bin), 'src', 'lima');
 for my $example (@ARGV) {
-    my $config = "$repo_root/src/lima/examples/$example.yaml", ;
+    my $config = "$repo_root/examples/$example.yaml", ;
     die "Config $config not found" unless -f $config;
     system("limactl delete -f $example") if -d "$ENV{HOME}/.lima/$example";
     system("limactl start --tty=false $config");
@@ -63,17 +59,45 @@ for my $example (@ARGV) {
     system("limactl stop $example");
     system("limactl delete $example");
 }
-system("sudo pkill dtrace");
+system("sudo pkill FileMonitor");
 
-open(my $fh, "<", $opensnoop) or die "Can't read $opensnoop: $!";
-while (<$fh>) {
+sleep 10;
+# truncate last line to remove offending json string
+my $addr;
+open (FH, "+< $filemonitor") or die "can't update $filemonitor: $!";
+while ( <FH> ) {
+    $addr = tell(FH) unless eof(FH);
+}
+truncate(FH, $addr) or die "can't truncate $filemonitor: $!";
+
+open(my $fh, "<", $filemonitor) or die "Can't read $filemonitor: $!";
+while (my $line = <$fh>) {
     # Only record files opened by limactl or qemu-*
-    next unless /^\s*\d+\s+\d+\s+(limactl|qemu-)/;
-    # Ignore files not under /usr/local
-    next unless s|^.*($install_dir/\S+).*$|$1|s;
+    my $decoded_json = decode_json($line);
+    my $processName = $decoded_json->{'file'}{'process'}{'name'};
+    my $fileName = $decoded_json->{'file'}{'destination'};
+    next unless $processName =~ /^\s*(limactl|qemu-)/;
+
+    # Skip /opt/homebrew/bin and /usr/local/bin
+    next if $fileName eq "$install_dir/bin";
+    # Ignore files not under /usr/local or /opt/homebrew
+    next unless $fileName =~ /^.*($install_dir\/\S+).*$/;
     # Skip files that don't exist
-    next unless -f;
-    record($_);
+    next unless -e $fileName;
+
+    #Skip if file is already recorded
+    next if exists($deps{$fileName});
+    print "Filename: $fileName \n";
+
+    # find all links of $filename and record.
+    my $links = `find -L  $install_dir/opt -samefile $fileName`;
+    record($fileName);
+    my @arr = split('\n', $links);
+    for my $link (@arr) {
+        #skip if link is already recorded
+        next if exists($deps{$link});
+        record($link);
+    }
 }
 
 print "$_ $deps{$_}\n" for sort keys %deps;
@@ -121,22 +145,6 @@ for my $file (keys %resign) {
 
 my $files = join(" ", map s|^$install_dir/||r, keys %deps);
 
-# Package vde_vmnet and prerequisites from /opt/vde → vde in the tarball
-my $opt_vde = "/opt/vde";
-die if -e "/tmp/$dist/vde";
-if (-f "$opt_vde/bin/vde_vmnet") {
-    my $dylib = "libvdeplug.3.dylib";
-    system("mkdir -p /tmp/$dist/vde/lib");
-    system("cp $opt_vde/lib/$dylib /tmp/$dist/vde/lib/$dylib");
-    $files .= " vde/lib/$dylib";
-
-    system("mkdir -p /tmp/$dist/vde/bin");
-    for my $tool (qw(vde_switch vde_vmnet)) {
-        system("cp $opt_vde/bin/$tool /tmp/$dist/vde/bin/$tool");
-        system "install_name_tool -change $opt_vde/lib/$dylib \@executable_path/../lib/$dylib /tmp/$dist/vde/bin/$tool 2>&1";
-        $files .= " vde/bin/$tool";
-    }
-}
 
 # Package socket_vmnet
 die if -e "/tmp/$dist/socket_vmnet";
