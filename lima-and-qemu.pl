@@ -127,8 +127,18 @@ if ($arch eq "aarch64") {
 print "$_ $deps{$_}\n" for sort keys %deps;
 print "\n";
 
-my $dist = "qemu-darwin-$arch";
+# "qemu-9.1.0-macos12-x86_64"
+my $dist = "qemu";
+$dist .= "-$ENV{VERSION}" if $ENV{VERSION};
+$dist .= "-darwin-$arch";
 system("rm -rf /tmp/$dist");
+
+# Record build information
+my $buildenv = "/tmp/$dist/build-env.txt";
+system("mkdir -p /tmp/$dist");
+system("uname -a >>$buildenv");
+system("sw_vers >>$buildenv");
+system("pkgutil --pkg-info=com.apple.pkg.CLTools_Executables >>$buildenv");
 
 # Copy all files to /tmp tree and make all dylib references relative to the
 # /usr/local/bin directory using @executable_path/..
@@ -191,7 +201,7 @@ for my $attr (("com.apple.FinderInfo", "com.apple.ResourceFork")) {
 
 my $repo_root = $FindBin::Bin;
 unlink("$repo_root/$dist.tar.gz");
-system("tar cvfz $repo_root/$dist.tar.gz -C /tmp/$dist $files");
+system("tar cvfz $repo_root/$dist.tar.gz -C /tmp/$dist build-env.txt $files");
 
 exit;
 
