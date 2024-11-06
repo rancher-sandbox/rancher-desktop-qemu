@@ -68,8 +68,8 @@ jobs:
         path: qemu-${{ steps.version.outputs.VERSION }}-darwin-source-${{ matrix.arch }}.tar.gz
         if-no-files-found: error
     - run: mkdir -p build
-    - run: brew install filemonitor ninja
-    - run: brew install --ignore-dependencies lima # Don't pull in qemu
+    - run: brew install filemonitor ninja go
+    - run: brew install lima
       env:
         HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
         HOMEBREW_NO_AUTO_UPDATE: 1
@@ -164,6 +164,7 @@ jobs:
       working-directory: build
     - run: ./appdir-qemu.sh "${{ github.workspace }}/install/usr"
       env:
+        LD_LIBRARY_PATH: ${{ github.workspace }}/install/usr/lib/x86_64-linux-gnu
         VERSION: ${{ steps.version.outputs.VERSION }}
     - uses: actions/upload-artifact@v4
       with:
