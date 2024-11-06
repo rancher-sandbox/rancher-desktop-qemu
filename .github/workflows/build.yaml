@@ -164,6 +164,7 @@ jobs:
       working-directory: build
     - run: ./appdir-qemu.sh "${{ github.workspace }}/install/usr"
       env:
+        LD_LIBRARY_PATH: ${{ github.workspace }}/install/usr/lib/x86_64-linux-gnu
         VERSION: ${{ steps.version.outputs.VERSION }}
     - uses: actions/upload-artifact@v4
       with:
