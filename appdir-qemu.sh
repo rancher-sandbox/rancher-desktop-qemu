@@ -46,9 +46,7 @@ set -ex
 [ -d "${1}" ] || error "Directory ${1} doesn't exist"
 
 appDir=$1
-dist="qemu"
-[[ -n $VERSION ]] && dist="${dist}-${VERSION}"
-dist="${dist}-linux-x86_64"
+dist="qemu${VERSION:+-$VERSION}-linux-x86_64"
 
 # Inspired on linuxdeployqt https://github.com/probonopd/linuxdeployqt/blob/master/tools/linuxdeployqt/excludelist.h
 # Linuxdeployqt is a tool created by probonopd, the AppImage creator
