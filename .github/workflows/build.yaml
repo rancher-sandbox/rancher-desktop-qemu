@@ -13,7 +13,9 @@
 # limitations under the License.
 
 name: build
-on: [ push ]
+on:
+- push
+- pull_request
 permissions:
   contents: read
 jobs:
@@ -77,7 +79,10 @@ jobs:
         HOMEBREW_NO_INSTALL_CLEANUP: 1
     - run: cpan -Ti JSON
     - run: echo "$PWD/install/bin" >>"$GITHUB_PATH"
-    - run: perl lima-and-qemu.pl alpine
+    - run: |
+        export USE_OTOOL=0
+        [[ "${{ matrix.arch }}" == "aarch64" ]] && USE_OTOOL=1
+        perl lima-and-qemu.pl alpine
       timeout-minutes: 10
       env:
         VERSION: ${{ steps.version.outputs.VERSION }}
