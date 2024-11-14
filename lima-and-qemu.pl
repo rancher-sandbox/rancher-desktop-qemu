@@ -47,8 +47,6 @@ my $arch = $proc =~ /86/ ? "x86_64" : "aarch64";
 
 my %deps;
 chomp(my $install_dir = qx(brew --prefix));
-record("$install_dir/bin/qemu-img");
-record("$install_dir/bin/qemu-system-$arch");
 
 # qemu 6.1.0 doesn't use the symlink to access data files anymore
 # but we need to include it because we replace the symlinks in
@@ -58,77 +56,107 @@ my $name = "$install_dir/share/qemu";
 # Don't call record($name) because we only want the link, not the whole target directory
 $deps{$name} = "→ " . readlink($name);
 
-# Capture any library and datafiles access with FileMonitor
-my $filemonitor = "/tmp/filemonitor.log";
-END { system("sudo pkill FileMonitor") }
-print "sudo may prompt for password to run FileMonitor\n";
-
-#Change this FileMonitor path for local build to installed path
-system("sudo -b filemonitor -skipApple >$filemonitor 2>/dev/null");
-sleep(1) until -s $filemonitor;
-
-chomp(my $lima_dir = qx(brew --prefix lima));
-for my $example (@ARGV) {
-    my $config = "$lima_dir/share/lima/templates/$example.yaml";
-    die "Config $config not found" unless -f $config;
-    system("limactl delete -f $example") if -d "$ENV{HOME}/.lima/$example";
-    system("limactl start --tty=false --cpus 2 --log-level debug $config");
-    system("limactl shell $example uname");
-    system("limactl stop $example");
-    system("limactl delete $example");
-}
-system("sudo pkill FileMonitor");
-
-sleep 10;
-
-open(my $fh, "<", $filemonitor) or die "Can't read $filemonitor: $!";
-while (my $line = <$fh>) {
-    # Only record files opened by qemu-*
-    my $decoded_json;
-    {
-        local $@;
-        eval { $decoded_json = decode_json($line) };
-        next if $@;
-    }
-    my $processName = $decoded_json->{'file'}{'process'}{'name'};
-    my $fileName = $decoded_json->{'file'}{'destination'};
-    next unless $processName =~ /^\s*qemu-/;
-
-    # Skip /opt/homebrew/bin and /usr/local/bin
-    next if $fileName eq "$install_dir/bin";
-    # Ignore files not under /usr/local or /opt/homebrew
-    next unless $fileName =~ /^.*($install_dir\/\S+).*$/;
-    # Skip files that don't exist
-    next unless -e $fileName;
-
-    #Skip if file is already recorded
-    next if exists($deps{$fileName});
-    print "Filename: $fileName \n";
-
-    # find all links of $filename and record.
-    my $links = `find -L  $install_dir/opt -samefile $fileName`;
-    record($fileName);
-    my @arr = split('\n', $links);
-    for my $link (@arr) {
-        #skip if link is already recorded
-        next if exists($deps{$link});
-        record($link);
-    }
-}
-
 # Temporary hack because we can't run qemu aarch64 in CI
 if ($arch eq "aarch64") {
     chomp(my $qemu_dir = qx(brew --prefix qemu));
     record("$qemu_dir/share/qemu/kvmvapic.bin");
     record("$qemu_dir/share/qemu/efi-virtio.rom");
     record("$qemu_dir/share/qemu/vgabios-virtio.bin");
+    record("$qemu_dir/share/qemu/edk2-aarch64-code.fd");
+}
+else {
+    # TODO: need to record x86_64 data files if we want to USE_OTOOL for dependencies
+}
+
+my @deps;
+push @deps, "$install_dir/bin/qemu-img";
+push @deps, "$install_dir/bin/qemu-system-$arch";
+
+if ($ENV{USE_OTOOL}) {
+    while (@deps) {
+        my $dep = shift @deps;
+        next if seen($dep);
+        record($dep);
+        next unless qx(file $dep) =~ /Mach-O/;
+
+        open(my $fh, "otool -L $dep |") or die "Failed to run 'otool -L $dep': $!";
+        while (<$fh>) {
+            my($dylib) = m|^\s+($install_dir/\S+)| or next;
+            push @deps, $dylib unless seen($dylib);
+        }
+        close($fh);
+    }
+}
+else {
+    record($_) for @deps;
+
+    # Capture any library and datafiles access with FileMonitor
+    my $filemonitor = "/tmp/filemonitor.log";
+    if (-f $filemonitor) {
+        print "Re-analyzing existing $filemonitor; delete it to capture new file events\n"
+    }
+    else {
+        eval 'END { system("sudo pkill -9 FileMonitor") }';
+        print "sudo may prompt for password to run FileMonitor\n";
+
+        # Change this FileMonitor path for local build to installed path
+        system("sudo -b filemonitor -skipApple >$filemonitor 2>/dev/null");
+        sleep(1) until -s $filemonitor;
+
+        chomp(my $lima_dir = qx(brew --prefix lima));
+        for my $example (@ARGV) {
+            my $config = "$lima_dir/share/lima/templates/$example.yaml";
+            die "Config $config not found" unless -f $config;
+            system("limactl delete -f $example") if -d "$ENV{HOME}/.lima/$example";
+            system("limactl start --tty=false --vm-type qemu --cpus 2 --log-level debug $config");
+            system("limactl shell $example uname");
+            system("limactl stop $example");
+            system("limactl delete $example");
+        }
+        system("sudo pkill -9 FileMonitor");
+
+        sleep 10;
+    }
+
+    open(my $fh, "<", $filemonitor) or die "Can't read $filemonitor: $!";
+    while (my $line = <$fh>) {
+        next unless $line =~    /^\{.*\}$/;
+        # Only record files opened by qemu-*
+        my $decoded_json = decode_json($line);
+        my $processName = $decoded_json->{'file'}{'process'}{'name'} or next;
+        my $fileName = $decoded_json->{'file'}{'destination'} or next;
+        next unless $processName =~ /^\s*qemu-/;
+
+        # Skip /opt/homebrew/bin and /usr/local/bin
+        next if $fileName =~ m|^.*($install_dir/bin/\S+).*$|;
+        # Ignore files not under /usr/local or /opt/homebrew
+        next unless $fileName =~ m|^.*($install_dir/\S+).*$|;
+        # Skip files that don't exist
+        record($fileName) if -f $fileName;
+    }
+}
+
+# find all links of regular files and record.
+foreach my $file (grep -f, keys %deps) {
+    print "Finding links for $file\n";
+    record($_) for split('\n', `find -L  $install_dir/opt -samefile $file`);
 }
 
 print "$_ $deps{$_}\n" for sort keys %deps;
 print "\n";
 
-my $dist = "qemu-darwin-$arch";
+# "qemu-9.1.0-macos12-x86_64"
+my $dist = "qemu";
+$dist .= "-$ENV{VERSION}" if $ENV{VERSION};
+$dist .= "-darwin-$arch";
 system("rm -rf /tmp/$dist");
+
+# Record build information
+my $buildenv = "/tmp/$dist/build-env.txt";
+system("mkdir -p /tmp/$dist");
+system("uname -a >>$buildenv");
+system("sw_vers >>$buildenv");
+system("pkgutil --pkg-info=com.apple.pkg.CLTools_Executables >>$buildenv");
 
 # Copy all files to /tmp tree and make all dylib references relative to the
 # /usr/local/bin directory using @executable_path/..
@@ -191,7 +219,7 @@ for my $attr (("com.apple.FinderInfo", "com.apple.ResourceFork")) {
 
 my $repo_root = $FindBin::Bin;
 unlink("$repo_root/$dist.tar.gz");
-system("tar cvfz $repo_root/$dist.tar.gz -C /tmp/$dist $files");
+system("tar cvfz $repo_root/$dist.tar.gz -C /tmp/$dist build-env.txt $files");
 
 exit;
 
@@ -206,6 +234,11 @@ exit;
 #   /usr/local/Cellar/libssh/0.9.5_1/lib/libssh.4.8.6.dylib [394K]
 
 my %seen;
+
+sub seen {
+    return $seen{$_[0]};
+}
+
 sub record {
     my $dep = shift;
     return if $seen{$dep}++;
