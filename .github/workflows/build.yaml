@@ -24,7 +24,7 @@ jobs:
       matrix:
         include:
         - { arch: aarch64, runs-on: macos-14, use-otool: 1 }
-        - { arch: x86_64, runs-on: macos-12, use-otool: 0 }
+        - { arch: x86_64, runs-on: macos-13, use-otool: 0 }
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 120
     steps:
@@ -50,12 +50,11 @@ jobs:
         set -o xtrace
         brew tap-new rd/tap
         cp qemu.rb "$(brew --repo rd/tap)/Formula/qemu.rb"
-        # Python 3.11, 3.12, and 3.13 are all required to build QEMU and its prerequisites.
-        # At least on macos-12 `brew install` will throw an error on conflicting files, so
-        # we need to install them explicitly with the `--overwrite` option.
+        # python@3.13 right now doesn't build from source (fails test_xml_etree_c tests) so install it from bottle for now
+        # install python@3.11 and @3.12 from source first, so we capture the dependencies in source
         brew install --overwrite --build-from-source $(brew deps --include-build python@3.11)  python@3.11
         brew install --overwrite --build-from-source $(brew deps --include-build python@3.12)  python@3.12
-        brew install --overwrite --build-from-source $(brew deps --include-build python@3.13)  python@3.13
+        brew install --overwrite python@3.13
         brew install --build-from-source $(brew deps --include-build rd/tap/qemu) rd/tap/qemu
         CACHE=$(brew --cache)
         cp .github/workflows/build.yaml qemu.rb "$CACHE"
@@ -111,6 +110,8 @@ jobs:
         repository: qemu/qemu
         ref: v9.2.0
         path: qemu
+        fetch-depth: 0
+        submodules: recursive
     - name: Install dependencies
       run: >-
         sudo apt-get update &&
