@@ -76,16 +76,21 @@ declare -a excludeLibs=(
 firmwareOfInterest=" bios-256k.bin edk2-x86_64-code.fd efi-virtio.rom kvmvapic.bin vgabios-virtio.bin "
 executablesOfInterest=" qemu-system-x86_64 qemu-img "
 
-mkdir -p "${appDir}/lib"
+mkdir -p "${appDir:?}/lib"
 
-linkedLibs=$(ldd "${appDir}/bin/qemu-system-x86_64" | grep " => /" | cut -d" " -f3)$'\n'
-linkedLibs+=$(ldd "${appDir}/bin/qemu-img" | grep " => /" | cut -d" " -f3)$'\n'
-for lib in $(echo "${linkedLibs}" | sort | uniq ); do
+declare -a linkedLibs
+read -ra linkedLibs < <(ldd "${appDir}/bin/qemu-system-x86_64" "${appDir}/bin/qemu-img" \
+  | awk '/=>/ { print $3 }' \
+  | sort --unique)
+for lib in "${linkedLibs[@]}"; do
   if [[ " ${excludeLibs[*]} " =~ \ $(basename "${lib}")\  ]]; then
     continue
   fi
-  cp "${lib}" "${appDir}/lib"
+  cp --dereference "${lib}" "${appDir}/lib"
 done
+
+# Remove static libraries, etc. (We copied the dynamic libraries to .../lib)
+rm -rf "${appDir:?}/lib/x86_64-linux-gnu"
 
 # strip docs
 rm -rf "${appDir:?}/share/doc"
