@@ -48,37 +48,49 @@ set -ex
 appDir=$1
 dist="qemu${VERSION:+-$VERSION}-linux-x86_64"
 
-# Inspired on linuxdeployqt https://github.com/probonopd/linuxdeployqt/blob/master/tools/linuxdeployqt/excludelist.h
-# Linuxdeployqt is a tool created by probonopd, the AppImage creator
-excludeLibs=" libz.so.1 "
-excludeLibs+="libgio-2.0.so.0 "
-excludeLibs+="libgobject-2.0.so.0 "
-excludeLibs+="libglib-2.0.so.0 "
-excludeLibs+="libutil.so.1 "
-excludeLibs+="libm.so.6 "
-excludeLibs+="libgcc_s.so.1 "
-excludeLibs+="libpthread.so.0 "
-excludeLibs+="libc.so.6 "
-excludeLibs+="libresolv.so.2 "
-excludeLibs+="libdl.so.2 "
-excludeLibs+="librt.so.1 "
-excludeLibs+="libuuid.so.1 "
-excludeLibs+="libdl.so.2 "
-excludeLibs+="libgmodule-2.0.so.0 "
+# List derived from https://github.com/AppImageCommunity/pkg2appimage/blob/master/excludelist
+declare -a excludeLibs=(
+  # glibc / toolchain / other base libraries.
+  libz.so.1
+  libutil.so.1
+  libm.so.6
+  libgcc_s.so.1
+  libpthread.so.0
+  libc.so.6
+  libresolv.so.2
+  librt.so.1
+  libuuid.so.1
+  libdl.so.2
+  # Because the Electron application itself depends on GLib2, we cannot bundle
+  # GLib2 libraries we pick up from qemu as we'd end up missing some things in
+  # the AppImage build (e.g. libgdk_pixbuf) and pull incompatible versions from
+  # the host.
+  libblkid.so.1
+  libgio-2.0.so.0
+  libglib-2.0.so.0
+  libgmodule-2.0.so.0
+  libgobject-2.0.so.0
+  libmount.so.1
+)
 
 firmwareOfInterest=" bios-256k.bin edk2-x86_64-code.fd efi-virtio.rom kvmvapic.bin vgabios-virtio.bin "
 executablesOfInterest=" qemu-system-x86_64 qemu-img "
 
-mkdir -p "${appDir}/lib"
+mkdir -p "${appDir:?}/lib"
 
-linkedLibs=$(ldd "${appDir}/bin/qemu-system-x86_64" | grep " => /" | cut -d" " -f3)$'\n'
-linkedLibs+=$(ldd "${appDir}/bin/qemu-img" | grep " => /" | cut -d" " -f3)$'\n'
-for lib in $(echo "${linkedLibs}" | sort | uniq ); do
-  if [[ "${excludeLibs}" =~ \ $(basename ${lib})\  ]]; then
+declare -a linkedLibs
+read -ra linkedLibs < <(ldd "${appDir}/bin/qemu-system-x86_64" "${appDir}/bin/qemu-img" \
+  | awk '/=>/ { print $3 }' \
+  | sort --unique)
+for lib in "${linkedLibs[@]}"; do
+  if [[ " ${excludeLibs[*]} " =~ \ $(basename "${lib}")\  ]]; then
     continue
   fi
-  cp "${lib}" "${appDir}/lib"
+  cp --dereference "${lib}" "${appDir}/lib"
 done
+
+# Remove static libraries, etc. (We copied the dynamic libraries to .../lib)
+rm -rf "${appDir:?}/lib/x86_64-linux-gnu"
 
 # strip docs
 rm -rf "${appDir:?}/share/doc"
