@@ -23,8 +23,8 @@ jobs:
     strategy:
       matrix:
         include:
-        - { arch: aarch64, runs-on: macos-14, use-otool: 1 }
-        - { arch: x86_64, runs-on: macos-13, use-otool: 0 }
+        - { arch: aarch64, runs-on: macos-15, use-otool: 1 }
+        - { arch: x86_64, runs-on: macos-15-intel, use-otool: 0 }
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 120
     steps:
